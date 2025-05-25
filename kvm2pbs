@@ -1,0 +1,231 @@
+#!/bin/bash
+
+# Copyright (C) 2025 Pirx Developers - https://pirx.dev/
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+VERSION="20250525"
+
+SCRIPT_DIR="$(realpath "${0}")"
+SCRIPT_DIR="$(dirname "${SCRIPT_DIR}")"
+if test -f "${SCRIPT_DIR}/kvm-pbs.func"; then
+  . "${SCRIPT_DIR}/kvm-pbs.func"
+else
+  echo "Function file not found or not readable"
+  exit 1
+fi
+if test -f "${SCRIPT_DIR}/kvm-pbs.conf"; then
+  . "${SCRIPT_DIR}/kvm-pbs.conf"
+else
+  echo "Configuration file not found or not readable"
+  exit 1
+fi
+log_file="$(mktemp 2>/dev/null)"
+log "kvm2pbs ${VERSION}"
+declare -A excluded_vms
+declare -A excluded_disks
+for entry in ${excludes}; do
+  if [[ "${entry}" != *:* ]]; then
+    excluded_vms[${entry}]=1
+  else
+    excluded_disks[${entry%:*}]="${entry#*:}"
+  fi
+done
+declare -A vm_backup_status
+while read vm_id vm_name vm_state; do
+  if [[ -v excluded_vms["${vm_name}"] ]]; then
+    vm_backup_status["${vm_name}"]="excluded"
+    log "Skipping backup of excluded VM ${vm_name}"
+    continue
+  fi
+  if [ "${vm_state}" != "running" ] && [ "${vm_state}" != "shut off" ]; then
+    vm_backup_status["${vm_name}"]="failed"
+    log "Skipping backup of VM ${vm_name}, unsupported VM state: ${vm_state}"
+    continue
+  fi
+  if [ "${vm_state}" = "running" ]; then
+    log "VM ${vm_name} is running, checking QEMU guest agent availability"
+    run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-ping"}'
+    if [ $? -ne 0 ]; then
+      vm_backup_status["${vm_name}"]="failed"
+      log "Skipping backup of VM ${vm_name}, QEMU guest agent is not responding"
+      continue
+    fi
+  fi
+  log "Starting backup of VM ${vm_name}"
+  backup_data=$(mktemp 2>/dev/null)
+  add_backup_data "vm	${vm_name}"
+  add_backup_data "config	${vm_config_dir}/${vm_name}.xml"
+  unset vm_excluded_disks
+  declare -A vm_excluded_disks
+  if [[ -v excluded_disks["${vm_name}"] ]]; then
+    for disk in ${excluded_disks["${vm_name}"]//,/ }; do
+      vm_excluded_disks["${disk}"]=1
+    done
+  fi
+  unset vm_backup_disks
+  declare -A vm_backup_disks
+  qcow2_snapshot="false"
+  qcow2_snapshot_args=()
+  while read blk_type blk_device blk_target blk_source; do
+    if [ "${blk_device}" = "disk" ]; then
+      if [[ -v vm_excluded_disks["${blk_target}"] ]]; then
+        log "Skipping backup of excluded disk ${blk_target}"
+        qcow2_snapshot_args+=(--diskspec "${blk_target},snapshot=no")
+        continue
+      fi
+      if [ "${blk_type}" = "block" ]; then
+        qcow2_snapshot_args+=(--diskspec "${blk_target},snapshot=no")
+        blk_storage_type="$(lsblk -r -n -o type ${blk_source} 2>/dev/null)"
+        if [ "${blk_storage_type}" = "lvm" ]; then
+          lv_type=$(lvs --noheadings -o segtype "${blk_source}" 2>/dev/null | tr -d ' ' 2>/dev/null)
+          if [ "${lv_type}" = "linear" ] || [ "${lv_type}" = "thin" ]; then
+            log "Scheduling disk ${blk_target} -> ${blk_source} for backup"
+            vm_backup_disks["${blk_target}"]="lvm_${lv_type}:${blk_source}"
+            add_backup_data "disk	${blk_target}	raw	${blk_source}"
+          else
+            log "Skipping backup of disk ${blk_target}, unsupported LV type: ${lv_type}"
+            vm_backup_status["${vm_name}"]="failed"
+          fi
+        else
+          log "Skipping backup of disk ${blk_target}, unsupported storage type: ${blk_storage_type}"
+          vm_backup_status["${vm_name}"]="failed"
+        fi
+      elif [ "${blk_type}" = "file" ]; then
+        blk_storage_type="$(qemu-img info -U "${blk_source}" 2>/dev/null | sed -r -n 's/^file\sformat:\s+//p' 2>/dev/null)"
+        if [ "${blk_storage_type}" = "qcow2" ]; then
+          log "Scheduling disk ${blk_target} -> ${blk_source} for backup"
+          qcow2_snapshot="true"
+          vm_backup_disks["${blk_target}"]="qcow2:${blk_source}"
+          add_backup_data "disk	${blk_target}	qcow2	${blk_source}"
+        else
+          log "Skipping backup of disk ${blk_target}, unsupported storage type: ${blk_storage_type}"
+          qcow2_snapshot_args+=(--diskspec "${blk_target},snapshot=no")
+          vm_backup_status["${vm_name}"]="failed"
+        fi
+      else
+        log "Skipping backup of disk ${blk_target}, unsupported storage type: ${blk_type}"
+        qcow2_snapshot_args+=(--diskspec "${blk_target},snapshot=no")
+        vm_backup_status["${vm_name}"]="failed"
+      fi
+    fi
+  done < <(virsh -q domblklist --details "${vm_name}" 2>/dev/null)
+  if [ "${#vm_backup_disks[@]}" -eq 0 ]; then
+    log "Skipping backup of VM ${vm_name}, no disks to backup"
+    continue
+  fi
+  snapshot_id="$(head /dev/urandom | tr -dc 'a-zA-Z0-9' 2>/dev/null | head -c 10 2>/dev/null)"
+  if [ "${vm_state}" = "running" ]; then
+    log "Freezing VM filesystem"
+    run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-fsfreeze-freeze"}'
+    if [ $? -ne 0 ]; then
+      vm_backup_status["${vm_name}"]="failed"
+      log "Failed to freeze, backup cannot continue"
+      continue
+    fi
+    snapshot_id="$(head /dev/urandom | tr -dc 'a-zA-Z0-9' 2>/dev/null | head -c 10 2>/dev/null)"
+    for disk_name in "${!vm_backup_disks[@]}"; do
+      disk_type="${vm_backup_disks["${disk_name}"]%:*}"
+      disk_path="${vm_backup_disks["${disk_name}"]#*:}"
+      if [ "${disk_type}" = "lvm_linear" ] || [ "${disk_type}" = "lvm_thin" ]; then
+        lv_size="$(lvs --units b --noheadings -o lvsize "${disk_path}" 2>/dev/null | tr -d '[:space:]B' 2>/dev/null)"
+        snapshot_path="${disk_path}-${snapshot_id}"
+        log "Creating LVM snapshot for disk ${disk_name}"
+        if [ "${disk_type}" = "lvm_linear" ]; then
+          run lvcreate -s -n "$(basename "${snapshot_path}")" -l "${lvm_snapshot_percentage}%ORIGIN" "${disk_path}"
+        else
+          run lvcreate -s -K -n "$(basename "${snapshot_path}")" "${disk_path}"
+        fi
+        if [ $? -ne 0 ]; then
+          unset 'vm_backup_disks[${disk_name}]'
+          vm_backup_status["${vm_name}"]="failed"
+          log "Failed to create LVM snapshot, disk ${disk_name} cannot be backed up"
+          continue
+        fi
+      fi
+    done
+    if [ "${qcow2_snapshot}" = "true" ]; then
+      log "Creating QCOW2 overlay snapshot of VM disks"
+      run virsh snapshot-create-as --domain "${vm_name}" --name "${snapshot_id}" --disk-only --no-metadata ${qcow2_snapshot_args[*]}
+    fi
+    log "Thawing VM filesystem"
+    run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-fsfreeze-thaw"}'
+    if [ $? -ne 0 ]; then
+      log "Failed to thaw, VM may be inoperable"
+    fi
+  fi
+  pbc_args=()
+  for disk_name in "${!vm_backup_disks[@]}"; do
+    disk_type="${vm_backup_disks["${disk_name}"]%:*}"
+    disk_path="${vm_backup_disks["${disk_name}"]#*:}"
+    if [ "${vm_state}" = "running" ] && ( [ "${disk_type}" = "lvm_linear" ] || [ "${disk_type}" = "lvm_thin" ] ); then
+      pbc_args+=("disk-${disk_name//[^a-zA-Z0-9]/-}.img:${disk_path}-${snapshot_id}")
+    else
+      pbc_args+=("disk-${disk_name//[^a-zA-Z0-9]/-}.img:${disk_path}")
+    fi
+  done
+  pbc_args+=("vm.conf:${vm_config_dir}/${vm_name}.xml")
+  pbc_args+=("backup.conf:${backup_data}")
+  pbc_args+=("--backup-id ${vm_name}")
+  pbc_args+=("--backup-type host")
+  pbc_args+=("--repository ${pbs_user}@${pbs_host}:${pbs_repository}")
+  if [ ! -z "${pbs_namespace}" ]; then
+    pbc_args+=("--ns ${pbs_namespace}")
+  fi
+  log "Backing up VM ${vm_name} to Proxmox Backup Server"
+  export PBS_PASSWORD="${pbs_password}"
+  export PBS_FINGERPRINT="${pbs_fingerprint}"
+  run proxmox-backup-client backup ${pbc_args[*]}
+  if [ $? -ne 0 ]; then
+    vm_backup_status["${vm_name}"]="failed"
+    log "Backup of VM ${vm_name} has failed"
+  fi
+  unset PBS_PASSWORD
+  unset PBS_FINGERPRINT
+  if [[ ! -v vm_backup_status["${vm_name}"] ]]; then
+    vm_backup_status["${vm_name}"]="ok"
+  fi
+  if [ "${vm_state}" = "running" ]; then
+    for disk_name in "${!vm_backup_disks[@]}"; do
+      disk_type="${vm_backup_disks["${disk_name}"]%:*}"
+      disk_path="${vm_backup_disks["${disk_name}"]#*:}"
+      if [ "${disk_type}" = "lvm_linear" ] || [ "${disk_type}" = "lvm_thin" ]; then
+        log "Removing LVM snapshot for disk ${disk_name}"
+        run lvremove -f "${disk_path}-${snapshot_id}"
+        if [ $? -ne 0 ]; then
+          log "Failed to remove snapshot, you will need to remove it manually"
+        fi
+      elif [ "${disk_type}" = "qcow2" ]; then
+        log "Commiting QCOW2 overlay snapshot changes for disk ${disk_name}"
+        run virsh blockcommit "${vm_name}" "${disk_name}" --active --verbose --pivot
+        if [ $? -eq 0 ]; then
+          log "Removing QCOW2 overlay snapshot for disk ${disk_name}"
+          run rm -f "${disk_path%.*}.${snapshot_id}"
+          if [ $? -ne 0 ]; then
+            log "Failed to remove snapshot, you will need to remove it manually"
+          fi
+        else
+          log "Failed to commit snapshot changes, you will need to do it manually"
+        fi
+      fi
+    done
+  fi
+  rm -f "${backup_data}" 2>/dev/null
+done < <(virsh -q list --all 2>/dev/null)
+log "---"
+log "Backup summary:"
+for vm_name in $(printf '%s\n' "${!vm_backup_status[@]}" | sort); do
+  log "VM ${vm_name}: ${vm_backup_status["${vm_name}"]}"
+done
+send_email
+rm -f "${log_file}"

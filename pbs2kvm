@@ -1,0 +1,166 @@
+#!/bin/bash
+
+# Copyright (C) 2025 Pirx Developers - https://pirx.dev/
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+VERSION="20250525"
+
+SCRIPT_DIR="$(realpath "${0}")"
+SCRIPT_DIR="$(dirname "${SCRIPT_DIR}")"
+
+if test -f "${SCRIPT_DIR}/kvm-pbs.func"; then
+  . "${SCRIPT_DIR}/kvm-pbs.func"
+else
+  echo "Function file not found or not readable"
+  exit 1
+fi
+if test -f "${SCRIPT_DIR}/kvm-pbs.conf"; then
+  . "${SCRIPT_DIR}/kvm-pbs.conf"
+else
+  echo "Configuration file not found or not readable"
+  exit 1
+fi
+for path in "/bin/jq" "/usr/bin/jq" "/usr/local/bin/jq" "~/bin/jq"; do
+  if [ -x "${path}" ]; then
+    jq_path="${path}"
+  fi
+done
+if [ -z "${jq_path}" ]; then
+  echo "Command jq not found or not executable, please install jq JSON processor"
+  exit 1
+fi
+export PBS_PASSWORD="${pbs_password}"
+export PBS_FINGERPRINT="${pbs_fingerprint}"
+trap 'unset PBS_PASSWORD PBS_FINGERPRINT' EXIT
+if [ -z "${XDG_RUNTIME_DIR}" ]; then
+  export XDG_RUNTIME_DIR="${HOME}/tmp"
+fi
+if [ -z "${1}" ]; then
+  pbc_args=()
+  pbc_args+=("list")
+  pbc_args+=("--repository ${pbs_user}@${pbs_host}:${pbs_repository}")
+  if [ ! -z "${pbs_namespace}" ]; then
+    pbc_args+=("--ns ${pbs_namespace}")
+  fi
+  pbc_args+=("--output-format=json")
+  echo "Available backup groups:"
+  echo
+  proxmox-backup-client ${pbc_args[*]} 2>/dev/null | jq -r '.[] | "\(.["backup-type"])/\(.["backup-id"])"' 2>/dev/null
+  if [ $? -ne 0 ]; then
+    echo "Error reading list of backup groups from Proxmox Backup Server"
+    exit 1
+  fi
+  exit 0
+fi
+if [ -z "${2}" ]; then
+  pbc_args=()
+  pbc_args+=("snapshot")
+  pbc_args+=("list")
+  pbc_args+=("${1}")
+  pbc_args+=("--repository ${pbs_user}@${pbs_host}:${pbs_repository}")
+  if [ ! -z "${pbs_namespace}" ]; then
+    pbc_args+=("--ns ${pbs_namespace}")
+  fi
+  pbc_args+=("--output-format=json")
+  echo "Available backup snapshots for group ${1}:"
+  echo
+  proxmox-backup-client ${pbc_args[*]} 2>/dev/null | jq -r '.[] | (.["backup-time"] | strftime("%Y-%m-%dT%H:%M:%SZ"))' 2>/dev/null
+  if [ $? -ne 0 ]; then
+    echo "Error reading list of backup snapshots from Proxmox Backup Server"
+    exit 1
+  fi
+  exit 0
+fi
+if [ -z "${3}" ] || [ -z "${4}" ]; then
+  backup_data=$(mktemp -d 2>/dev/null)
+  pbc_args=()
+  pbc_args+=("restore")
+  pbc_args+=("${1}/${2}")
+  pbc_args+=("backup.conf.blob")
+  pbc_args+=("${backup_data}/backup.conf")
+  pbc_args+=("--repository ${pbs_user}@${pbs_host}:${pbs_repository}")
+  if [ ! -z "${pbs_namespace}" ]; then
+    pbc_args+=("--ns ${pbs_namespace}")
+  fi
+  proxmox-backup-client ${pbc_args[*]}
+  if [ $? -ne 0 ] || [ ! -f "${backup_data}/backup.conf" ]; then
+    echo "Error reading backup configuration from Proxmox Backup Server"
+    rm -rf "${backup_data}" 1>/dev/null 2>&1
+    exit 1
+  fi
+  echo "Contents of backup snapshot ${1}/${2}:"
+  echo
+  awk -F'\t' '
+  {
+    if ($1 == "vm") {
+      vm_name = $2
+    } else if ($1 == "config") {
+      vm_config = $2
+    } else if ($1 == "disk") {
+      disk_name = $2
+      disk_type = $3
+      disk_path = $4
+      disks[++count, "name"] = disk_name
+      disks[count, "type"] = disk_type
+      disks[count, "path"] = disk_path
+    }
+  }
+  END {
+    print "Virtual machine name: " vm_name
+    print ""
+    printf "%-15s %-6s %-6s %-8s %s\n", "Object", "Type", "Format", "Device", "Original path"
+    printf "%-15s %-6s %-6s %-8s %s\n", "---------------", "------", "------", "--------", "---------------------------------------"
+    printf "%-15s %-6s %-6s %-8s %s\n", "vm.conf.blob", "Config", "-", "-", vm_config
+    for (i = 1; i <= count; i++) {
+      printf "%-15s %-6s %-6s %-8s %s\n", "disk-" disks[i, "name"] ".img", "Disk", toupper(disks[i, "type"]), disks[i, "name"], disks[i, "path"]
+    }
+  }
+  ' "${backup_data}/backup.conf"
+  cat <<EOF
+  
+To restore a configuration file or disk image, add the object name and target
+path to the script options. For example:
+
+./pbs2kvm host/myvm 2025-05-25T05:20:25Z disk-sda.img /dev/vmvg/vmdisk
+EOF
+  rm -rf "${backup_data}" 1>/dev/null 2>&1
+  exit 0
+fi
+pbc_args=()
+pbc_args+=("restore")
+pbc_args+=("${1}/${2}")
+pbc_args+=("${3}")
+if [ -b "${4}" ]; then
+  pbc_args+=("-")
+else
+  pbc_args+=("${4}")
+fi
+pbc_args+=("--repository ${pbs_user}@${pbs_host}:${pbs_repository}")
+if [ ! -z "${pbs_namespace}" ]; then
+  pbc_args+=("--ns ${pbs_namespace}")
+fi
+if [ -b "${4}" ]; then
+  echo "Warning!"
+  echo "Block device ${4} will be overwritten!"
+  read -p "Type YES to continue: " confirm
+  if [ "${confirm}" != "YES" ]; then
+    echo "Restore canceled"
+    exit 1
+  fi
+  echo "Restoring image ${3} to ${4}, please wait..."
+  proxmox-backup-client ${pbc_args[*]} | dd of="${4}" bs=4M conv=fsync
+else
+  echo "Restoring image ${3} to ${4}, please wait..."
+  proxmox-backup-client ${pbc_args[*]}
+fi

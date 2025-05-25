@@ -1,0 +1,78 @@
+# Copyright (C) 2007-2022 Pirx Developers - https://pirx.dev/
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+log () {
+  echo "$(date +"${date_format}") $@" | tee -a "${log_file}"
+}
+
+run () {
+  log "+ $*"
+  "$@" | tee -a "${log_file}"
+}
+
+run_silent () {
+  log "+ $*"
+  "$@" 1>/dev/null 2>&1
+}
+
+add_backup_data () {
+  echo "$*" >> "${backup_data}"
+}
+
+send_email () {
+  if ! test -z "${smtp_host}" && ! test -z "${report_emails}"; then
+    echo -n "  Sending report to ${report_emails}"
+    if ! test -z "${curl_options}"; then
+      curl_opts="${curl_options}"
+    else
+      curl_opts=""
+    fi
+    if test -z "${smtp_port}"; then
+      smtp_port="587"
+    fi
+    if [ "${smtp_port}" = "465" ]; then
+      smtp_proto="smtps"
+    else
+      smtp_proto="smtp"
+    fi
+    curl_opts="${curl_opts} -s ${smtp_proto}://${smtp_host}:${smtp_port}"
+    if ! test -z "${smtp_user}" && ! test -z "${smtp_password}"; then
+      curl_opts="${curl_opts} --user ${smtp_user}:${smtp_password}"
+    fi
+    curl_opts="${curl_opts} --upload-file - --mail-from ${mail_from}"
+    for mail in ${report_emails}; do
+      curl_opts="${curl_opts} --mail-rcpt ${mail}"
+    done
+    if ! test -z "${mail_name}"; then
+      mail_addr="\"${mail_name}\" <${mail_from}>"
+    else
+      mail_addr="${mail_from}"
+    fi
+    cat 2>/dev/null <<EOF | curl ${curl_opts}
+$(for mail in ${report_emails}; do echo "To: ${mail}"; done)
+From: ${mail_addr}
+Reply-To: ${mail_from}
+Mime-Version: 1.0
+Content-type: text/plain; charset="utf-8"
+Subject: KVM backup for host $(hostname -f)
+
+$(cat "${log_file}" 2>/dev/null)
+EOF
+    if [ $? -eq 0 ]; then
+      echo " OK"
+    else
+      echo " FAILED"
+    fi
+  fi
+}
