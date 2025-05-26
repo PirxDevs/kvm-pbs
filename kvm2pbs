@@ -30,6 +30,14 @@ else
   echo "Configuration file not found or not readable"
   exit 1
 fi
+dry_run=0
+while getopts "d" option; do
+  case "${option}" in
+    d)
+      dry_run=1
+      ;;
+  esac
+done
 log_file="$(mktemp 2>/dev/null)"
 log "kvm2pbs ${VERSION}"
 declare -A excluded_vms
@@ -122,16 +130,20 @@ while read vm_id vm_name vm_state; do
   done < <(virsh -q domblklist --details "${vm_name}" 2>/dev/null)
   if [ "${#vm_backup_disks[@]}" -eq 0 ]; then
     log "Skipping backup of VM ${vm_name}, no disks to backup"
+    rm -f "${backup_data}" 2>/dev/null
     continue
   fi
   snapshot_id="$(head /dev/urandom | tr -dc 'a-zA-Z0-9' 2>/dev/null | head -c 10 2>/dev/null)"
   if [ "${vm_state}" = "running" ]; then
     log "Freezing VM filesystem"
-    run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-fsfreeze-freeze"}'
-    if [ $? -ne 0 ]; then
-      vm_backup_status["${vm_name}"]="failed"
-      log "Failed to freeze, backup cannot continue"
-      continue
+    if [ "${dry_run}" -eq 0 ]; then
+      run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-fsfreeze-freeze"}'
+      if [ $? -ne 0 ]; then
+        vm_backup_status["${vm_name}"]="failed"
+        log "Failed to freeze, backup cannot continue"
+        rm -f "${backup_data}" 2>/dev/null
+        continue
+      fi
     fi
     snapshot_id="$(head /dev/urandom | tr -dc 'a-zA-Z0-9' 2>/dev/null | head -c 10 2>/dev/null)"
     for disk_name in "${!vm_backup_disks[@]}"; do
@@ -141,27 +153,38 @@ while read vm_id vm_name vm_state; do
         lv_size="$(lvs --units b --noheadings -o lvsize "${disk_path}" 2>/dev/null | tr -d '[:space:]B' 2>/dev/null)"
         snapshot_path="${disk_path}-${snapshot_id}"
         log "Creating LVM snapshot for disk ${disk_name}"
-        if [ "${disk_type}" = "lvm_linear" ]; then
-          run lvcreate -s -n "$(basename "${snapshot_path}")" -l "${lvm_snapshot_percentage}%ORIGIN" "${disk_path}"
-        else
-          run lvcreate -s -K -n "$(basename "${snapshot_path}")" "${disk_path}"
-        fi
-        if [ $? -ne 0 ]; then
-          unset 'vm_backup_disks[${disk_name}]'
-          vm_backup_status["${vm_name}"]="failed"
-          log "Failed to create LVM snapshot, disk ${disk_name} cannot be backed up"
-          continue
+        if [ "${dry_run}" -eq 0 ]; then
+          if [ "${disk_type}" = "lvm_linear" ]; then
+            run lvcreate -s -n "$(basename "${snapshot_path}")" -l "${lvm_snapshot_percentage}%ORIGIN" "${disk_path}"
+          else
+            run lvcreate -s -K -n "$(basename "${snapshot_path}")" "${disk_path}"
+          fi
+          if [ $? -ne 0 ]; then
+            unset 'vm_backup_disks[${disk_name}]'
+            vm_backup_status["${vm_name}"]="failed"
+            log "Failed to create LVM snapshot, disk ${disk_name} cannot be backed up"
+            continue
+          fi
         fi
       fi
     done
     if [ "${qcow2_snapshot}" = "true" ]; then
       log "Creating QCOW2 overlay snapshot of VM disks"
-      run virsh snapshot-create-as --domain "${vm_name}" --name "${snapshot_id}" --disk-only --no-metadata ${qcow2_snapshot_args[*]}
+      if [ "${dry_run}" -eq 0 ]; then
+        run virsh snapshot-create-as --domain "${vm_name}" --name "${snapshot_id}" --disk-only --no-metadata ${qcow2_snapshot_args[*]}
+        if [ $? -ne 0 ]; then
+          log "Failed to create QCOW2 overlay snapshot, backup cannot continue"
+          rm -f "${backup_data}" 2>/dev/null
+          continue
+        fi
+      fi
     fi
     log "Thawing VM filesystem"
-    run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-fsfreeze-thaw"}'
-    if [ $? -ne 0 ]; then
-      log "Failed to thaw, VM may be inoperable"
+    if [ "${dry_run}" -eq 0 ]; then
+      run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-fsfreeze-thaw"}'
+      if [ $? -ne 0 ]; then
+        log "Failed to thaw, VM may be inoperable"
+      fi
     fi
   fi
   pbc_args=()
@@ -183,15 +206,17 @@ while read vm_id vm_name vm_state; do
     pbc_args+=("--ns ${pbs_namespace}")
   fi
   log "Backing up VM ${vm_name} to Proxmox Backup Server"
-  export PBS_PASSWORD="${pbs_password}"
-  export PBS_FINGERPRINT="${pbs_fingerprint}"
-  run proxmox-backup-client backup ${pbc_args[*]}
-  if [ $? -ne 0 ]; then
-    vm_backup_status["${vm_name}"]="failed"
-    log "Backup of VM ${vm_name} has failed"
+  if [ "${dry_run}" -eq 0 ]; then
+    export PBS_PASSWORD="${pbs_password}"
+    export PBS_FINGERPRINT="${pbs_fingerprint}"
+    run proxmox-backup-client backup ${pbc_args[*]}
+    if [ $? -ne 0 ]; then
+      vm_backup_status["${vm_name}"]="failed"
+      log "Backup of VM ${vm_name} has failed"
+    fi
+    unset PBS_PASSWORD
+    unset PBS_FINGERPRINT
   fi
-  unset PBS_PASSWORD
-  unset PBS_FINGERPRINT
   if [[ ! -v vm_backup_status["${vm_name}"] ]]; then
     vm_backup_status["${vm_name}"]="ok"
   fi
@@ -201,21 +226,25 @@ while read vm_id vm_name vm_state; do
       disk_path="${vm_backup_disks["${disk_name}"]#*:}"
       if [ "${disk_type}" = "lvm_linear" ] || [ "${disk_type}" = "lvm_thin" ]; then
         log "Removing LVM snapshot for disk ${disk_name}"
-        run lvremove -f "${disk_path}-${snapshot_id}"
-        if [ $? -ne 0 ]; then
-          log "Failed to remove snapshot, you will need to remove it manually"
-        fi
-      elif [ "${disk_type}" = "qcow2" ]; then
-        log "Commiting QCOW2 overlay snapshot changes for disk ${disk_name}"
-        run virsh blockcommit "${vm_name}" "${disk_name}" --active --verbose --pivot
-        if [ $? -eq 0 ]; then
-          log "Removing QCOW2 overlay snapshot for disk ${disk_name}"
-          run rm -f "${disk_path%.*}.${snapshot_id}"
+        if [ "${dry_run}" -eq 0 ]; then
+          run lvremove -f "${disk_path}-${snapshot_id}"
           if [ $? -ne 0 ]; then
             log "Failed to remove snapshot, you will need to remove it manually"
           fi
-        else
-          log "Failed to commit snapshot changes, you will need to do it manually"
+        fi
+      elif [ "${disk_type}" = "qcow2" ]; then
+        log "Commiting QCOW2 overlay snapshot changes for disk ${disk_name}"
+        if [ "${dry_run}" -eq 0 ]; then
+          run virsh blockcommit "${vm_name}" "${disk_name}" --active --verbose --pivot
+          if [ $? -eq 0 ]; then
+            log "Removing QCOW2 overlay snapshot for disk ${disk_name}"
+            run rm -f "${disk_path%.*}.${snapshot_id}"
+            if [ $? -ne 0 ]; then
+              log "Failed to remove snapshot, you will need to remove it manually"
+            fi
+          else
+            log "Failed to commit snapshot changes, you will need to do it manually"
+          fi
         fi
       fi
     done
