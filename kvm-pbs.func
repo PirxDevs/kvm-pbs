@@ -19,6 +19,7 @@ log () {
 run () {
   log "+ $*"
   "$@" | tee -a "${log_file}"
+  return "${PIPESTATUS[0]}"
 }
 
 run_silent () {
