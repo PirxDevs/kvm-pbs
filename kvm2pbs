@@ -256,5 +256,9 @@ log "Backup summary:"
 for vm_name in $(printf '%s\n' "${!vm_backup_status[@]}" | sort); do
   log "VM ${vm_name}: ${vm_backup_status["${vm_name}"]}"
 done
-send_email
+if [ "${dry_run}" -eq 0 ]; then
+  send_email
+else
+  echo "Sending report to ${report_emails}"
+fi
 rm -f "${log_file}"
