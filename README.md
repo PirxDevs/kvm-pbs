@@ -37,8 +37,8 @@ Available backup snapshots for group host/myvm:
 Once more, add the snapshot name as an option to the script and run it. This will list the contents of the given VM snapshot (backup).
 
 ```
-# ./pbs2kvm host/myvm 2025-06-26T02:02:03Z
-Contents of backup snapshot host/myvm/2025-06-26T02:02:03Z:
+# ./pbs2kvm host/myvm 2025-05-25T05:20:25Z
+Contents of backup snapshot host/myvm/2025-05-25T05:20:25Z:
 
 Virtual machine name: myvm
 
