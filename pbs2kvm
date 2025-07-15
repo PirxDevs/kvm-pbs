@@ -56,7 +56,7 @@ if [ -z "${1}" ]; then
   pbc_args+=("--output-format=json")
   echo "Available backup groups:"
   echo
-  proxmox-backup-client ${pbc_args[*]} 2>/dev/null | jq -r '.[] | "\(.["backup-type"])/\(.["backup-id"])"' 2>/dev/null
+  proxmox-backup-client ${pbc_args[*]} 2>/dev/null | jq -r '[ .[] | "\(.["backup-type"])/\(.["backup-id"])" ] | sort []' 2>/dev/null
   if [ $? -ne 0 ]; then
     echo "Error reading list of backup groups from Proxmox Backup Server"
     exit 1
@@ -75,7 +75,7 @@ if [ -z "${2}" ]; then
   pbc_args+=("--output-format=json")
   echo "Available backup snapshots for group ${1}:"
   echo
-  proxmox-backup-client ${pbc_args[*]} 2>/dev/null | jq -r '.[] | (.["backup-time"] | strftime("%Y-%m-%dT%H:%M:%SZ"))' 2>/dev/null
+  proxmox-backup-client ${pbc_args[*]} 2>/dev/null | jq -r '[ .[] | (.["backup-time"] | strftime("%Y-%m-%dT%H:%M:%SZ")) ] | sort []' 2>/dev/null
   if [ $? -ne 0 ]; then
     echo "Error reading list of backup snapshots from Proxmox Backup Server"
     exit 1
