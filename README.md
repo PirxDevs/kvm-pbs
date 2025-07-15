@@ -16,27 +16,27 @@ To run the backup, simply run the script, or preferrably, add it to the cron job
 
 This script allows you to restore your virtual machines from a backup. Simply run the script, and it will return a list of available backup groups (VMs).
 
-``
+```
 # ./pbs2kvm
 Available backup groups:
 
 host/myvm
 host/othervm
-``
+```
 
 Add the desired group name as an option to the script, then run it again. It will list the available snapshots for the given backup group.
 
-``
+```
 # ./pbs2kvm host/myvm
 Available backup snapshots for group host/myvm:
 
 2025-05-25T05:20:25Z
 2025-06-25T05:03:13Z
-``
+```
 
 Once more, add the snapshot name as an option to the script and run it. This will list the contents of the given VM snapshot (backup).
 
-``
+```
 # ./pbs2kvm host/myvm 2025-06-26T02:02:03Z
 Contents of backup snapshot host/myvm/2025-06-26T02:02:03Z:
 
@@ -47,10 +47,12 @@ Object          Type   Format Device   Original path
 vm.conf.blob    Config -      -        /etc/libvirt/qemu/myvm.xml
 disk-sda.img    Disk   RAW    sda      /dev/vmvg/myvm-root
 disk-sdb.img    Disk   RAW    sdb      /dev/vmvg/myvm-data
-``
+```
 
 You must then restore each virtual disk separately, followed by the virtual machine configuration. For example:
 
 `./pbs2kvm host/myvm 2025-05-25T05:20:25Z disk-sda.img /dev/vmvg/myvm-root`
+
 `./pbs2kvm host/myvm 2025-05-25T05:20:25Z disk-sdb.img /dev/vmvg/myvm-data`
+
 `./pbs2kvm host/myvm 2025-05-25T05:20:25Z vm.conf.blob /etc/libvirt/qemu/myvm.xml`
