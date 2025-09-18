@@ -10,7 +10,7 @@ This script will back up all virtual machines except those listed as excluded in
 
 Backups will include all virtual disks based on LVM volumes (thick or thin) and QCOW2 image files. If the machine is running, LVM/QCOW2 snapshots will be used to ensure the disks are in a consistent state. To accomplish this, all file system operations inside the VM must be temporarily paused. For this reason, only machines with a running QEMU Guest Agent can be backed up while running.
 
-To run the backup, simply run the script, or preferrably, add it to the cron job.
+To run the backup, simply run the script, or preferrably, add it to the cron job. You can first run it with the -d option for a dry run to see what will be done.
 
 ## pbs2kvm
 
