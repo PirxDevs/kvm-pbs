@@ -32,6 +32,7 @@ add_backup_data () {
 }
 
 send_email () {
+  local curl_opts
   if ! test -z "${smtp_host}" && ! test -z "${report_emails}"; then
     echo -n "Sending report to ${report_emails}"
     if ! test -z "${curl_options}"; then
