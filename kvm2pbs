@@ -137,8 +137,9 @@ while read vm_id vm_name vm_state; do
   if [ "${vm_state}" = "running" ]; then
     log "Freezing VM filesystem"
     if [ "${dry_run}" -eq 0 ]; then
-      run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-fsfreeze-freeze"}'
+      run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-fsfreeze-freeze"}' --timeout 10
       if [ $? -ne 0 ]; then
+        run_silent virsh -q qemu-agent-command "${vm_name}" '{"execute":"guest-fsfreeze-thaw"}'
         vm_backup_status["${vm_name}"]="failed"
         log "Failed to freeze, backup cannot continue"
         rm -f "${backup_data}" 2>/dev/null
