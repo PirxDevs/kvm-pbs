@@ -251,7 +251,7 @@ while read vm_id vm_name vm_state; do
     done
   fi
   rm -f "${backup_data}" 2>/dev/null
-done < <(virsh -q list --all 2>/dev/null)
+done < <(virsh -q list --all 2>/dev/null | sort -b -k 2,2)
 log "---"
 log "Backup summary:"
 for vm_name in $(printf '%s\n' "${!vm_backup_status[@]}" | sort); do
