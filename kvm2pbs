@@ -96,7 +96,7 @@ while read vm_id vm_name vm_state; do
         qcow2_snapshot_args+=(--diskspec "${blk_target},snapshot=no")
         blk_storage_type="$(lsblk -r -n -o type ${blk_source} 2>/dev/null)"
         if [ "${blk_storage_type}" = "lvm" ]; then
-          lv_type=$(lvs --noheadings -o segtype "${blk_source}" 2>/dev/null | tr -d ' ' 2>/dev/null)
+          lv_type=$(lvs --noheadings -o segtype "${blk_source}" 2>/dev/null | head -n 1 2>/dev/null | tr -d ' ' 2>/dev/null)
           if [ "${lv_type}" = "linear" ] || [ "${lv_type}" = "thin" ]; then
             log "Scheduling disk ${blk_target} -> ${blk_source} for backup"
             vm_backup_disks["${blk_target}"]="lvm_${lv_type}:${blk_source}"
