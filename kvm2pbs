@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-VERSION="20250525"
+VERSION="20260719"
 
 SCRIPT_DIR="$(realpath "${0}")"
 SCRIPT_DIR="$(dirname "${SCRIPT_DIR}")"
